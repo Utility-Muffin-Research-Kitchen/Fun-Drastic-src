@@ -1,9 +1,9 @@
 # About this mirror
 
-**Fun Drastic is tenlevels' work.** Everything else in this repository —
-`src/`, `shared/`, `targets/`, `docs/`, the build and packaging scripts,
-`LICENSE`, `CREDITS.md`, `README.md` — is his, kept verbatim. This file is the
-only thing UMRK has added, and it exists solely to say where the tree came from.
+**Fun Drastic is tenlevels' work.** `src/`, `shared/`, `targets/`, `docs/`, the
+build and packaging scripts, `LICENSE`, `CREDITS.md` and `README.md` are his.
+This file is UMRK's, and it exists to say where the tree came from and what has
+been changed on top of it.
 
 tenlevels wrote the hook, designed the menus, themes and overlays, brought up
 the MLP1 target, and donated the source so Leaf can build Fun DraStic from
@@ -19,8 +19,25 @@ port and the "Leaf" theme. None of that is ours.
 | Received | 2026-09-04 |
 | Omitted | `build/` and `dist/` only — regenerated output his own `.gitignore` excludes |
 
-No file has been edited, reformatted, or relicensed. To re-sync a later drop,
-replace the tree and commit; keep this file and keep his verbatim.
+The import commit is his tree exactly as sent — nothing reformatted, nothing
+relicensed. To re-sync a later drop, replace the tree and commit.
+
+## Local changes
+
+tenlevels agreed that fixes can go straight into this tree rather than being
+carried as patches downstream, so that anyone forking it gets them. Every
+commit after the import is therefore a change on top of his source, and the
+history is the record of what is his and what is not:
+
+```sh
+git log --oneline <import commit>..HEAD -- src shared targets docs
+```
+
+Fixes made here should go back to tenlevels so his own tree carries them too.
+
+| Commit | Change |
+| --- | --- |
+| `c2e270f` | Clip cheat names to the row they are drawn in — long entries from `usrcheat.dat` ran through the `< ON/OFF >` control and off the panel |
 
 ## Licensing
 
