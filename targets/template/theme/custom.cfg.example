@@ -1,0 +1,20 @@
+# Fun Drastic custom theme. Edit the colours below to match your system,
+# then this theme appears as the last entry in OPTIONS > THEME.
+#
+# name        shown in the picker instead of "CUSTOM" (blank = "CUSTOM")
+# font        optional .ttf/.otf in the fonts/ folder, used while this
+#             theme is selected (leave out to keep Fun Drastic's own font)
+# colours     hex, #RRGGBB or #RRGGBBAA (the alpha byte is optional).
+#             Delete any line to keep the default Fun Drastic colour.
+
+name=Mono
+# font=MyFont.ttf
+
+bg=#141414
+header=#1E1E1E
+item=#282828C8
+selection=#3C3C3C
+accent=#FFFFFF
+text=#F0F0F0
+dim=#808080
+separator=#404040

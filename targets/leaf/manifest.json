@@ -1,0 +1,20 @@
+{
+  "id": "drastic",
+  "name": "Fun Drastic",
+  "platform": "mlp1",
+  "kind": "standalone-emulator",
+  "target_soc": "rk3566",
+  "target_cpu": "cortex-a55",
+  "build_profile": "perf",
+  "binary": "bin/drastic64",
+  "entrypoint": "launch.sh",
+  "sdl_video_driver": "wayland",
+  "bundled_libs": "libSDL2-2.0.so.0 libxkbcommon.so.0 libwayland-cursor.so.0 libasound.so.2 libfundrastic.so",
+  "package_note": "Fun Drastic: a standalone themed frontend for the upstream drastic64 emulator, provided by an LD_PRELOAD hook. Ships its own SDL2 stack (Wayland video, evdev joystick, PulseAudio). Installs in the drastic slot (id=drastic). State lives in its own .umrk/mlp1/fundrastic directory and never touches any other package's state.",
+  "exceptions": [
+    {
+      "artifact": "bin/drastic64",
+      "reason": "prebuilt upstream emulator binary"
+    }
+  ]
+}

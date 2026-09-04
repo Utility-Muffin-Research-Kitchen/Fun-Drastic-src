@@ -1,0 +1,10 @@
+# Build products and packed outputs (regenerated).
+build/
+dist/
+
+# Local working state.
+_backups/
+_to_delete/
+*.log
+debug.txt
+*.tmp
