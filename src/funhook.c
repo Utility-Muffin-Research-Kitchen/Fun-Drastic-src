@@ -2830,23 +2830,57 @@ static void draw_string(SDL_Renderer *r, const char *s, int x, int y,
     }
 }
 
+static int cp_w(int cp, int scale) {
+    if (USE_BITMAP(cp)) return 6 * scale;
+    float sc = ttf_scale(g_font, scale);
+    int adv = 0, lsb = 0;
+    stbtt_GetCodepointHMetrics(&g_font->info, cp, &adv, &lsb);
+    return (int)(adv * sc + 0.5f);
+}
+
 static int str_w(const char *s, int scale) {
     if (!(g_font && g_font->loaded)) return (int)strlen(s) * 6 * scale;
     int w = 0;
-    while (*s) {
-        int cp = utf8_next(&s);
-        if (USE_BITMAP(cp)) {
-            w += 6 * scale;
-        } else {
-            float sc = ttf_scale(g_font, scale);
-            int adv = 0, lsb = 0;
-            stbtt_GetCodepointHMetrics(&g_font->info, cp, &adv, &lsb);
-            w += (int)(adv * sc + 0.5f);
-        }
-    }
+    while (*s) w += cp_w(utf8_next(&s), scale);
     return w;
 }
 static int str_h(int scale)                { return 7 * scale; }
+
+/* draw_string, but never wider than max_w: the tail is replaced with "..."
+   when it does not fit. For text that comes from outside the hook and has no
+   length the layout can rely on.
+
+   The cut lands on a codepoint boundary, never mid-sequence. The cheat
+   database is community-maintained and full of non-ASCII names, and slicing a
+   UTF-8 sequence in half draws a replacement box or a wrong glyph rather than
+   a shorter name. */
+static void draw_string_fit(SDL_Renderer *r, const char *s, int x, int y,
+                            int scale, SDL_Color col, int max_w) {
+    if (max_w <= 0) return;
+    if (str_w(s, scale) <= max_w) {
+        draw_string(r, s, x, y, scale, col);
+        return;
+    }
+
+    static const char ELL[] = "...";
+    int  ell_w = str_w(ELL, scale);
+    char buf[256];
+    size_t used = 0;
+    int    w    = 0;
+
+    for (const char *p = s; *p; ) {
+        const char *glyph = p;
+        int    cp  = utf8_next(&p);
+        size_t len = (size_t)(p - glyph);
+        if (w + cp_w(cp, scale) > max_w - ell_w)       break;
+        if (used + len + sizeof(ELL) > sizeof(buf))    break;
+        memcpy(buf + used, glyph, len);
+        used += len;
+        w    += cp_w(cp, scale);
+    }
+    memcpy(buf + used, ELL, sizeof(ELL));
+    draw_string(r, buf, x, y, scale, col);
+}
 
 static void fill_rect(SDL_Renderer *r, int x, int y, int w, int h,
                       int R, int G, int B, int A) {
@@ -2966,14 +3000,22 @@ static void menu_render_cheats(SDL_Renderer *r) {
 
         int ty = iy + (IH - str_h(MN_BIG)) / 2;
 
-        SDL_Color tc = sel ? COL(TXT) : (e->enabled ? COL(TXT) : COL(DIM));
-        draw_string(r, e->name, IX + IPAD, ty, MN_BIG, tc);
-
         char vbuf[16];
         snprintf(vbuf, sizeof(vbuf), "< %s >", e->enabled ? tr("ON") : tr("OFF"));
         SDL_Color vc = e->enabled ? COL(ACC) : COL(DIM);
         int vw = str_w(vbuf, MN_BIG);
-        draw_string(r, vbuf, IX + IW - vw - IPAD, ty, MN_BIG, vc);
+        int vx = IX + IW - vw - IPAD;
+
+        /* Cheat names come from the database, not from a designer, and some of
+           them are sentences - "Unlimited Use of Konami Code for Full Power-up
+           with 30 Lives" is a real Contra 4 entry. Drawn unclipped they run
+           straight through the value on the right and off the panel, so the
+           name gets whatever room is left beside it and no more. */
+        SDL_Color tc = sel ? COL(TXT) : (e->enabled ? COL(TXT) : COL(DIM));
+        int name_x = IX + IPAD;
+        draw_string_fit(r, e->name, name_x, ty, MN_BIG, tc, vx - IPAD - name_x);
+
+        draw_string(r, vbuf, vx, ty, MN_BIG, vc);
     }
 
     if (g_cheats.count > CHEAT_ROWS_VISIBLE) {
