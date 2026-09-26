@@ -2346,7 +2346,31 @@ static void rom_name_from_path(const char *path) {
     snprintf(app.rom_name, MAX_FILE, "%s", base);
     char *dot = strrchr(app.rom_name, '.');
     if (dot) *dot = '\0';
-    if (strlen(app.rom_name) > 28) app.rom_name[28] = '\0';
+    /* Truncate on a character boundary, never a byte boundary. A naive byte
+       cut splits a multibyte UTF-8 sequence: CJK names are 3 bytes per code
+       point, so a 28-byte limit lands in the middle of a character and yields
+       an invalid-UTF-8 string. That string is then used verbatim as the
+       save / savestate / preview filename (see the __snprintf_chk save-path
+       rewrite and the state/preview path builders). On a FAT32 volume mounted
+       with the utf8 iocharset the kernel rejects a filename containing an
+       invalid UTF-8 byte sequence (EINVAL/EILSEQ); drastic64 cannot open the
+       save and aborts at launch - the white screen and immediate exit seen
+       with CJK-named ROMs. Primary Drastic has no hook and keeps the intact
+       valid name, which is why only Fun Drastic is affected; an ASCII name
+       truncates on a character boundary too, so it stays valid and works. */
+    if (strlen(app.rom_name) > 28) {
+        const unsigned char *p = (const unsigned char *)app.rom_name;
+        int n = 0;
+        while (*p && n < 28) {
+            if      (*p < 0x80)       p += 1;
+            else if ((*p & 0xE0) == 0xC0) p += 2;
+            else if ((*p & 0xF0) == 0xE0) p += 3;
+            else if ((*p & 0xF8) == 0xF0) p += 4;
+            else                         p += 1;   /* stray byte: consume it */
+            n++;
+        }
+        app.rom_name[p - (const unsigned char *)app.rom_name] = '\0';
+    }
 
     char *src = app.rom_name;
     char *dst = app.rom_display;
