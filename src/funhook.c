@@ -2340,13 +2340,51 @@ static void cursor_tex_load(SDL_Renderer *r) {
 
 
 
+/* Truncate s to at most max_cps codepoints and to at most cap-1 bytes, cutting
+   only on a character boundary. Cutting UTF-8 mid-character is the bug this
+   replaces: it yields a string that is not valid UTF-8, and such a string is
+   unusable as a filename on a FAT32 volume mounted with the utf8 iocharset
+   (the kernel rejects it with EINVAL/EILSEQ). */
+static void utf8_trunc(char *s, size_t cap, int max_cps) {
+    const unsigned char *p = (const unsigned char *)s;
+    size_t used = 0;
+    int cps = 0;
+    while (*p && cps < max_cps) {
+        size_t len;
+        if      (*p < 0x80)           len = 1;
+        else if ((*p & 0xE0) == 0xC0) len = 2;
+        else if ((*p & 0xF0) == 0xE0) len = 3;
+        else if ((*p & 0xF8) == 0xF0) len = 4;
+        else                          len = 1;   /* stray byte */
+        if (used + len >= cap) break;            /* would not fit the buffer */
+        int complete = 1;
+        for (size_t i = 1; i < len; i++)
+            if ((p[i] & 0xC0) != 0x80) { complete = 0; break; }
+        if (!complete) break;                    /* partial sequence: drop it */
+        p += len; used += len; cps++;
+    }
+    s[used] = '\0';
+}
+
 static void rom_name_from_path(const char *path) {
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
     snprintf(app.rom_name, MAX_FILE, "%s", base);
     char *dot = strrchr(app.rom_name, '.');
     if (dot) *dot = '\0';
-    if (strlen(app.rom_name) > 28) app.rom_name[28] = '\0';
+    /* Keep the ROM's own base name, whole, for every file this hook names:
+       the save (.sram), the savestates and the previews. It has to stay
+       identical to the name primary DraStic derives from the same ROM - only
+       the directory and the extension differ - otherwise a save mirrored in
+       by the launcher lands beside the one the emulator itself writes and the
+       game ends up with two files, one under a truncated name.
+       Truncating app.rom_name here was what caused that. It was also what made
+       the name invalid UTF-8 in the first place: a byte-level cut splits
+       multibyte sequences (CJK is 3 bytes per codepoint), and a FAT32 volume
+       mounted with the utf8 iocharset rejects such a filename, which aborted
+       drastic64 at launch. So there is no length limit at all beyond the
+       buffer itself, and even that cut is forced onto a character boundary. */
+    utf8_trunc(app.rom_name, MAX_FILE, MAX_FILE);
 
     char *src = app.rom_name;
     char *dst = app.rom_display;
@@ -2365,6 +2403,10 @@ static void rom_name_from_path(const char *path) {
 
     while (dst > app.rom_display && (*(dst-1) == ' ' || *(dst-1) == '_'))
         *--dst = '\0';
+
+    /* Display only: the menu header has room for about 28 characters. This is
+       a title and never a filename, so limiting it here costs nothing. */
+    utf8_trunc(app.rom_display, MAX_FILE, 28);
 }
 
 /* Translations. A language file is KEY=VALUE lines, one per string, where
