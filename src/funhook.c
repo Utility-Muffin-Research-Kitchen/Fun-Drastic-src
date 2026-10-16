@@ -567,6 +567,29 @@ static void cheat_write_cht(void) {
     fclose(f);
 }
 
+static void utf8_trunc(char *s, size_t cap, int max_cps);
+
+/* A cheat name is text if it is valid UTF-8 and has no control bytes.
+   Accepts CJK and other multibyte names; rejects stray or truncated sequences. */
+static int cheat_name_is_text(const uint8_t *s, long n) {
+    long k = 0;
+    while (k < n) {
+        uint8_t c = s[k];
+        if (c < 0x20 || c == 0x7f) return 0;
+        if (c < 0x80) { k++; continue; }
+        int len;
+        if      ((c & 0xE0) == 0xC0 && c >= 0xC2) len = 2;
+        else if ((c & 0xF0) == 0xE0)              len = 3;
+        else if ((c & 0xF8) == 0xF0 && c <= 0xF4) len = 4;
+        else return 0;
+        if (k + len > n) return 0;
+        for (int i = 1; i < len; i++)
+            if ((s[k + i] & 0xC0) != 0x80) return 0;
+        k += len;
+    }
+    return 1;
+}
+
 static void cheat_parse_usrcheat(void) {
     g_cheats.count  = 0;
     g_cheats.loaded = 0;
@@ -679,10 +702,10 @@ static void cheat_parse_usrcheat(void) {
 
         if (name_padded + 4 > body_size) continue;
 
-        int printable = 1;
-        for (long k = 0; k < name_end; k++) {
-            if (body[k] < 0x20 || body[k] >= 0x7f) { printable = 0; break; }
-        }
+        /* Names are UTF-8: usrcheat.dat carries Chinese, Japanese and Korean
+           descriptions, and rejecting every byte >= 0x7f dropped those cheats
+           silently. Keep a name if it is valid UTF-8 with no control bytes. */
+        int printable = cheat_name_is_text(body, name_end);
         if (!printable || name_end == 0) continue;
 
         uint32_t nc_dwords = 0;
@@ -694,6 +717,9 @@ static void cheat_parse_usrcheat(void) {
         int ni = (int)(name_end < CHEAT_NAME_LEN - 1 ? name_end : CHEAT_NAME_LEN - 1);
         memcpy(e.name, body, ni);
         e.name[ni] = '\0';
+        /* Cut on a character boundary: a byte cut through a multibyte name
+           leaves an invalid UTF-8 string behind. */
+        utf8_trunc(e.name, CHEAT_NAME_LEN, CHEAT_NAME_LEN);
         e.num_codes = 0;
 
         long code_off = name_padded + 4;
