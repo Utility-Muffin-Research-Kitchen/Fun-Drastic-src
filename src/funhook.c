@@ -452,21 +452,26 @@ static void drastic_save_state(int);
 static void drastic_load_state(int);
 static void drastic_cfg_set(const char *cfg_path, const char *key, const char *val);
 /* cheat entries are a dynamically-grown array sized to the loaded game's
-   cheat count — see cheat_parse_usrcheat. */
+   cheat count — see cheat_parse_usrcheat. Their codes share one pool,
+   g_cheats.codes, so each cheat keeps every pair it has. DraStic's .cht
+   loader and cheat engine take any number of pairs, and a cheat cut to a
+   fixed count (it was 32) can end inside an Action Replay conditional. */
 #define CHEAT_NAME_LEN   64
-#define MAX_CHEAT_CODES  32   // max AR code pairs per cheat
 
 typedef struct {
     char     name[CHEAT_NAME_LEN];
     uint8_t  enabled;
-    uint32_t codes[MAX_CHEAT_CODES * 2];
-    int      num_codes;
+    size_t   code_at;     // first word in g_cheats.codes
+    int      num_codes;   // code pairs, two words each
 } CheatEntry;
 
 static struct {
     CheatEntry *entries;   // dynamically grown to the game's cheat count
     int        cap;        // allocated capacity of `entries`
     int        count;
+    uint32_t  *codes;      // every cheat's codes, see CheatEntry.code_at
+    size_t     ncodes;     // words used in `codes`
+    size_t     codes_cap;  // words allocated
     char       game_code[8];
     int        loaded;
     int        dirty;
@@ -555,17 +560,19 @@ static void cheat_write_cht(void) {
 
     if (g_cheats.has_master) {
         CheatEntry *m = &g_cheats.master_entry;
+        const uint32_t *k = g_cheats.codes + m->code_at;
         fprintf(f, "[%s]+\n", m->name);
         for (int c = 0; c < m->num_codes; c++)
-            fprintf(f, "%08X %08X\n", m->codes[c*2], m->codes[c*2+1]);
+            fprintf(f, "%08X %08X\n", k[c*2], k[c*2+1]);
     }
 
     for (int i = 0; i < g_cheats.count; i++) {
         CheatEntry *e = &g_cheats.entries[i];
         if (!e->enabled || !e->num_codes) continue;
+        const uint32_t *k = g_cheats.codes + e->code_at;
         fprintf(f, "[%s]+\n", e->name);
         for (int c = 0; c < e->num_codes; c++)
-            fprintf(f, "%08X %08X\n", e->codes[c*2], e->codes[c*2+1]);
+            fprintf(f, "%08X %08X\n", k[c*2], k[c*2+1]);
     }
     fclose(f);
 }
@@ -662,6 +669,11 @@ static void cheat_parse_usrcheat(void) {
     free(g_cheats.entries);
     g_cheats.entries = NULL;
     g_cheats.cap     = 0;
+    free(g_cheats.codes);
+    g_cheats.codes      = NULL;
+    g_cheats.ncodes     = 0;
+    g_cheats.codes_cap  = 0;
+    g_cheats.has_master = 0;   /* its codes were in the pool just freed */
 
     cheat_read_game_code();
 
@@ -803,19 +815,26 @@ static void cheat_parse_usrcheat(void) {
 
         uint32_t nc_dwords = 0;
         memcpy(&nc_dwords, body + count_at, 4);
-        int num_pairs = (int)(nc_dwords / 2);
-        if (num_pairs < 0 || num_pairs > MAX_CHEAT_CODES) num_pairs = MAX_CHEAT_CODES;
+        long   code_off  = count_at + 4;
+        size_t num_pairs = nc_dwords / 2;
+        size_t room      = (size_t)(body_size - code_off) / 8;
+        if (num_pairs > room) num_pairs = room;   /* never past the record */
+
+        if (g_cheats.ncodes + num_pairs * 2 > g_cheats.codes_cap) {
+            size_t ncap = g_cheats.codes_cap ? g_cheats.codes_cap : 1024;
+            while (ncap < g_cheats.ncodes + num_pairs * 2) ncap *= 2;
+            uint32_t *nk = realloc(g_cheats.codes, ncap * sizeof(uint32_t));
+            if (!nk) break;   /* out of memory: keep what we've got so far */
+            g_cheats.codes     = nk;
+            g_cheats.codes_cap = ncap;
+        }
 
         CheatEntry e = {0};
-        e.num_codes = 0;
-
-        long code_off = count_at + 4;
-        for (int k = 0; k < num_pairs && code_off + 8 <= body_size; k++, code_off += 8) {
-            if (e.num_codes < MAX_CHEAT_CODES) {
-                memcpy(&e.codes[e.num_codes * 2 + 0], body + code_off,     4);
-                memcpy(&e.codes[e.num_codes * 2 + 1], body + code_off + 4, 4);
-                e.num_codes++;
-            }
+        e.code_at   = g_cheats.ncodes;
+        e.num_codes = (int)num_pairs;
+        if (num_pairs) {
+            memcpy(g_cheats.codes + g_cheats.ncodes, body + code_off, num_pairs * 8);
+            g_cheats.ncodes += num_pairs * 2;
         }
 
         if (g_cheats.count >= g_cheats.cap) {
