@@ -42,6 +42,7 @@ Fixes made here should go back to tenlevels so his own tree carries them too.
 | #2 | Read every cheat in `usrcheat.dat` with its own codes — keep the index scans inside the index, skip each cheat's note before its code count, decode GBK as well as UTF-8 names (`src/gbk_table.h`), and draw glyphs the menu font lacks from `Translate.otf` |
 | #3 | Draw a selected cheat's `< ON/OFF >` in the theme's text color — on the Leaf theme the accent equals the selection pill, so an enabled cheat's `ON` vanished on the selected row |
 | #4 | Keep every code pair of a cheat — codes were cut to the first 32 pairs, which can end inside an Action Replay conditional; DraStic itself reads and runs any number, so the hook now keeps them in one per-game pool |
+| #5 | Draw an unselected cheat's name in the theme's dim color whether or not the cheat is on — enabled names used the text color, which on the Leaf theme is the dark pill text on an equally dark background, so they vanished; the accent `< ON >` still marks enabled cheats |
 
 ## Licensing
 
