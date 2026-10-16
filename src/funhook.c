@@ -3173,7 +3173,7 @@ static void menu_render_cheats(SDL_Renderer *r) {
 
         char vbuf[16];
         snprintf(vbuf, sizeof(vbuf), "< %s >", e->enabled ? tr("ON") : tr("OFF"));
-        SDL_Color vc = e->enabled ? COL(ACC) : COL(DIM);
+        SDL_Color vc = sel ? COL(TXT) : (e->enabled ? COL(ACC) : COL(DIM));
         int vw = str_w(vbuf, MN_BIG);
         int vx = IX + IW - vw - IPAD;
 
