@@ -40,6 +40,9 @@
 #define STBTT_STATIC
 #include "lib/stb_truetype.h"
 
+/* GBK to Unicode, for cheat names - see cheat_name_decode() */
+#include "gbk_table.h"
+
 #define SDCARD_PATH_ENV     "SDCARD_PATH"
 #define SDCARD_DEFAULT      "/mnt/SDCARD"
 #define SAVES_DIR           "Saves/NDS"
@@ -569,13 +572,14 @@ static void cheat_write_cht(void) {
 
 static void utf8_trunc(char *s, size_t cap, int max_cps);
 
-/* A cheat name is text if it is valid UTF-8 and has no control bytes.
-   Accepts CJK and other multibyte names; rejects stray or truncated sequences. */
-static int cheat_name_is_text(const uint8_t *s, long n) {
+/* Text in usrcheat.dat is UTF-8 or GBK, the R4 format's usual encoding for
+   Chinese; the shipped database is GBK. Only ASCII names used to be kept, so
+   every Chinese, Japanese or Korean name was dropped and its cheat never
+   reached the menu. */
+static int text_is_utf8(const uint8_t *s, long n) {
     long k = 0;
     while (k < n) {
         uint8_t c = s[k];
-        if (c < 0x20 || c == 0x7f) return 0;
         if (c < 0x80) { k++; continue; }
         int len;
         if      ((c & 0xE0) == 0xC0 && c >= 0xC2) len = 2;
@@ -588,6 +592,66 @@ static int cheat_name_is_text(const uint8_t *s, long n) {
         k += len;
     }
     return 1;
+}
+
+static int text_has_control(const uint8_t *s, long n) {
+    for (long k = 0; k < n; k++)
+        if (s[k] < 0x20 || s[k] == 0x7f) return 1;
+    return 0;
+}
+
+/* A cheat name from the database as UTF-8 in out[cap], cut on a character
+   boundary. GBK pairs are looked up in gbk_table.h; an unassigned or broken
+   pair becomes '?', so the cheat still lists. */
+static void cheat_name_decode(char *out, size_t cap, const uint8_t *s, long n, int utf8) {
+    if (utf8) {
+        size_t len = (size_t)n < cap - 1 ? (size_t)n : cap - 1;
+        memcpy(out, s, len);
+        out[len] = '\0';
+        utf8_trunc(out, cap, (int)cap);
+        return;
+    }
+    size_t o = 0;
+    for (long k = 0; k < n; ) {
+        unsigned cp = s[k];
+        if (cp < 0x80) {
+            k++;
+        } else if (cp >= GBK_LEAD_FIRST && cp <= GBK_LEAD_LAST && k + 1 < n &&
+                   s[k + 1] >= GBK_TRAIL_FIRST && s[k + 1] <= GBK_TRAIL_LAST) {
+            cp = gbk_ucs[cp - GBK_LEAD_FIRST][s[k + 1] - GBK_TRAIL_FIRST];
+            if (!cp) cp = '?';
+            k += 2;
+        } else {
+            cp = '?';
+            k++;
+        }
+        char u[3];
+        size_t ul;
+        if (cp < 0x80) {
+            u[0] = (char)cp; ul = 1;
+        } else if (cp < 0x800) {
+            u[0] = (char)(0xC0 | cp >> 6);
+            u[1] = (char)(0x80 | (cp & 0x3F)); ul = 2;
+        } else {
+            u[0] = (char)(0xE0 | cp >> 12);
+            u[1] = (char)(0x80 | (cp >> 6 & 0x3F));
+            u[2] = (char)(0x80 | (cp & 0x3F)); ul = 3;
+        }
+        if (o + ul >= cap) break;
+        memcpy(out + o, u, ul);
+        o += ul;
+    }
+    out[o] = '\0';
+}
+
+static int cheat_name_is_master(const char *name) {
+    char nl[CHEAT_NAME_LEN];
+    size_t k = 0;
+    for (; name[k] && k < sizeof(nl) - 1; k++)
+        nl[k] = (name[k] >= 'A' && name[k] <= 'Z') ? name[k] + 32 : name[k];
+    nl[k] = '\0';
+    return strstr(nl, "must be on") || strstr(nl, "mustbeon") ||
+           strstr(nl, "master code") || strstr(nl, "enable code");
 }
 
 static void cheat_parse_usrcheat(void) {
@@ -636,10 +700,22 @@ static void cheat_parse_usrcheat(void) {
     uint8_t target[4];
     memcpy(target, g_cheats.game_code, 4);
 
+    /* The index is 16-byte entries {game code, CRC32, block offset, reserved}
+       from 0x100, ended by an entry whose offset is 0. Both scans below stay
+       inside it. Past it is cheat code, arbitrary bytes, and reading those as
+       index entries matched game codes and block offsets by accident: a stray
+       "offset" there ended a game's list early, or before its first cheat. */
+    long index_end = 0x100;
+    while (index_end + 16 <= fsize) {
+        uint32_t o = 0;
+        memcpy(&o, buf + index_end + 8, 4);
+        if (!o) break;
+        index_end += 16;
+    }
+
     uint32_t cheat_data_off = 0;
-    for (long i = 0x50; i <= fsize - 16; i += 16) {
-        if (buf[i]   == target[0] && buf[i+1] == target[1] &&
-            buf[i+2] == target[2] && buf[i+3] == target[3]) {
+    for (long i = 0x100; i < index_end; i += 16) {
+        if (memcmp(buf + i, target, 4) == 0) {
             memcpy(&cheat_data_off, buf + i + 8, 4);
             break;
         }
@@ -650,10 +726,10 @@ static void cheat_parse_usrcheat(void) {
     }
 
     /* Bound the walk by the NEXT game's block, not by the count field (which is
-       unreliable across R4 folder databases). Scan the 16-byte index (starts at
-       0x50) for the smallest block offset greater than ours; that's our end. */
+       unreliable across R4 folder databases): the smallest block offset in the
+       index greater than ours. */
     long block_end = fsize;
-    for (long i = 0x50; i + 16 <= fsize; i += 16) {
+    for (long i = 0x100; i < index_end; i += 16) {
         uint32_t o = 0;
         memcpy(&o, buf + i + 8, 4);
         if (o > cheat_data_off && (long)o < block_end) block_end = (long)o;
@@ -661,8 +737,18 @@ static void cheat_parse_usrcheat(void) {
 
     long p = (long)cheat_data_off;
 
+    /* The encoding is decided per game once its block has been read: UTF-8 if
+       every string in it (title, folder names, cheat names) is valid UTF-8,
+       else GBK. Deciding per name is not enough, because a short GBK name can
+       be valid UTF-8 by accident (C7 AE is one Chinese character in GBK and
+       one Latin letter in UTF-8). Until then each name is kept as its span in
+       buf, in names[], parallel to g_cheats.entries. */
+    int utf8 = 1;
+    struct { long off, len; } *names = NULL;
+
     long title_start = p;
     while (p < fsize && buf[p] != 0) p++;
+    if (!text_is_utf8(buf + title_start, p - title_start)) utf8 = 0;
     p++;
     long title_len = (p - title_start);
     p = title_start + (((title_len) + 3) & ~3);
@@ -684,6 +770,7 @@ static void cheat_parse_usrcheat(void) {
         if ((body_dwords >> 28) == 1) {
             long q = p;
             while (q < block_end && buf[q] != 0) q++;   /* folder name */
+            if (!text_is_utf8(buf + p, q - p)) utf8 = 0;
             q++;                                        /* skip its NUL */
             while (q < block_end && buf[q] != 0) q++;   /* folder note */
             q++;                                        /* skip its NUL */
@@ -696,33 +783,33 @@ static void cheat_parse_usrcheat(void) {
         uint8_t *body = buf + p;
         p += body_size;
 
+        /* [name\0][note\0], padded to 4, then the code count. The note has to
+           be skipped: reading the count straight after the name's padding
+           landed on the note, so a cheat with a note loaded its text as codes,
+           and one whose name filled its last word (length 3 mod 4) loaded the
+           note's NUL as a count of 0 and did nothing when turned on. */
         long name_end = 0;
         while (name_end < body_size && body[name_end] != 0) name_end++;
-        long name_padded = ((name_end + 1 + 3) & ~3);
+        long note_end = name_end + 1;
+        while (note_end < body_size && body[note_end] != 0) note_end++;
+        long count_at = ((note_end + 1 + 3) & ~3);
 
-        if (name_padded + 4 > body_size) continue;
+        if (count_at + 4 > body_size) continue;
 
-        /* Names are UTF-8: usrcheat.dat carries Chinese, Japanese and Korean
-           descriptions, and rejecting every byte >= 0x7f dropped those cheats
-           silently. Keep a name if it is valid UTF-8 with no control bytes. */
-        int printable = cheat_name_is_text(body, name_end);
-        if (!printable || name_end == 0) continue;
+        /* Neither UTF-8 nor GBK puts a control byte inside a character, so a
+           name with one is broken, not foreign. */
+        if (name_end == 0 || text_has_control(body, name_end)) continue;
+        if (!text_is_utf8(body, name_end)) utf8 = 0;
 
         uint32_t nc_dwords = 0;
-        memcpy(&nc_dwords, body + name_padded, 4);
+        memcpy(&nc_dwords, body + count_at, 4);
         int num_pairs = (int)(nc_dwords / 2);
         if (num_pairs < 0 || num_pairs > MAX_CHEAT_CODES) num_pairs = MAX_CHEAT_CODES;
 
         CheatEntry e = {0};
-        int ni = (int)(name_end < CHEAT_NAME_LEN - 1 ? name_end : CHEAT_NAME_LEN - 1);
-        memcpy(e.name, body, ni);
-        e.name[ni] = '\0';
-        /* Cut on a character boundary: a byte cut through a multibyte name
-           leaves an invalid UTF-8 string behind. */
-        utf8_trunc(e.name, CHEAT_NAME_LEN, CHEAT_NAME_LEN);
         e.num_codes = 0;
 
-        long code_off = name_padded + 4;
+        long code_off = count_at + 4;
         for (int k = 0; k < num_pairs && code_off + 8 <= body_size; k++, code_off += 8) {
             if (e.num_codes < MAX_CHEAT_CODES) {
                 memcpy(&e.codes[e.num_codes * 2 + 0], body + code_off,     4);
@@ -731,35 +818,41 @@ static void cheat_parse_usrcheat(void) {
             }
         }
 
-        int name_lower_is_master = 0;
-        {
-            char nl[CHEAT_NAME_LEN];
-            for (int k = 0; k < ni; k++)
-                nl[k] = (e.name[k] >= 'A' && e.name[k] <= 'Z') ? e.name[k]+32 : e.name[k];
-            nl[ni] = '\0';
-            if (strstr(nl, "must be on") || strstr(nl, "mustbeon") ||
-                strstr(nl, "master code") || strstr(nl, "enable code"))
-                name_lower_is_master = 1;
-        }
-
-        if (name_lower_is_master) {
-            if (!g_cheats.has_master) {
-                g_cheats.master_entry = e;
-                g_cheats.has_master = 1;
-            }
-            continue;
-        }
-
         if (g_cheats.count >= g_cheats.cap) {
             int ncap = g_cheats.cap ? g_cheats.cap * 2 : 64;
             CheatEntry *ne = realloc(g_cheats.entries,
                                      (size_t)ncap * sizeof(CheatEntry));
             if (!ne) break;   /* out of memory: keep what we've got so far */
             g_cheats.entries = ne;
+            void *nn = realloc(names, (size_t)ncap * sizeof *names);
+            if (!nn) break;
+            names = nn;
             g_cheats.cap     = ncap;
         }
+        names[g_cheats.count].off = (long)(body - buf);
+        names[g_cheats.count].len = name_end;
         g_cheats.entries[g_cheats.count++] = e;
     }
+
+    /* Now the encoding is known: name every cheat, and take the master code
+       out of the list. */
+    int kept = 0;
+    for (int i = 0; i < g_cheats.count; i++) {
+        CheatEntry *e = &g_cheats.entries[i];
+        cheat_name_decode(e->name, sizeof(e->name),
+                          buf + names[i].off, names[i].len, utf8);
+        if (cheat_name_is_master(e->name)) {
+            if (!g_cheats.has_master) {
+                g_cheats.master_entry = *e;
+                g_cheats.has_master = 1;
+            }
+            continue;
+        }
+        if (kept != i) g_cheats.entries[kept] = *e;
+        kept++;
+    }
+    g_cheats.count = kept;
+    free(names);
 
     free(buf);
 
@@ -2521,9 +2614,10 @@ static void lang_scan(void) {
     }
 }
 
-/* TrueType text. The 5x7 bitmap stays the default; a TTF loads only when
-   the UI needs glyphs it lacks (a translation, or a custom theme font).
-   Glyphs rasterise on demand into cached textures. */
+/* TrueType text. The 5x7 bitmap stays the default; a TTF draws what it
+   cannot (a translation, a custom theme font, or a Chinese cheat name in
+   English - see glyph_font()). Glyphs rasterise on demand into cached
+   textures. */
 typedef struct {
     unsigned char *data;
     stbtt_fontinfo info;
@@ -2872,21 +2966,30 @@ static void draw_char(SDL_Renderer *r, char c, int x, int y, int scale, SDL_Colo
 #define IS_ARROW(cp)   ((cp) == '<' || (cp) == '>')
 #define USE_BITMAP(cp) (BITMAP_HAS(cp) && (!g_font_all || IS_ARROW(cp)))
 
+/* The TTF that draws cp where the bitmap does not, or NULL if none can. The
+   active font comes first; a glyph it lacks falls back to the translation
+   font, which is loaded whatever the language and covers CJK. Without that
+   fallback a Chinese cheat name or ROM title drew as blank space in English,
+   and as missing-glyph boxes in a theme font such as the Leaf theme's. */
+static TTFont *glyph_font(int cp) {
+    if (g_font && g_font->loaded &&
+        (g_font == &g_ttf_tr || !g_ttf_tr.loaded ||
+         stbtt_FindGlyphIndex(&g_font->info, cp)))
+        return g_font;
+    return g_ttf_tr.loaded ? &g_ttf_tr : NULL;
+}
+
 static void draw_string(SDL_Renderer *r, const char *s, int x, int y,
                         int scale, SDL_Color col) {
-    if (!(g_font && g_font->loaded)) {
-        for (; *s; s++, x += 6 * scale)
-            draw_char(r, *s, x, y, scale, col);
-        return;
-    }
     int baseline = y + 7 * scale;
     while (*s) {
         int cp = utf8_next(&s);
-        if (USE_BITMAP(cp)) {
-            draw_char(r, (char)cp, x, y, scale, col);
+        TTFont *f = USE_BITMAP(cp) ? NULL : glyph_font(cp);
+        if (!f) {
+            if (BITMAP_HAS(cp)) draw_char(r, (char)cp, x, y, scale, col);
             x += 6 * scale;
         } else {
-            Glyph *g = glyph_get(r, g_font, cp, scale);
+            Glyph *g = glyph_get(r, f, cp, scale);
             if (g->tex) {
                 SDL_SetTextureColorMod(g->tex, col.r, col.g, col.b);
                 SDL_SetTextureAlphaMod(g->tex, col.a);
@@ -2899,15 +3002,15 @@ static void draw_string(SDL_Renderer *r, const char *s, int x, int y,
 }
 
 static int cp_w(int cp, int scale) {
-    if (USE_BITMAP(cp)) return 6 * scale;
-    float sc = ttf_scale(g_font, scale);
+    TTFont *f = USE_BITMAP(cp) ? NULL : glyph_font(cp);
+    if (!f) return 6 * scale;
+    float sc = ttf_scale(f, scale);
     int adv = 0, lsb = 0;
-    stbtt_GetCodepointHMetrics(&g_font->info, cp, &adv, &lsb);
+    stbtt_GetCodepointHMetrics(&f->info, cp, &adv, &lsb);
     return (int)(adv * sc + 0.5f);
 }
 
 static int str_w(const char *s, int scale) {
-    if (!(g_font && g_font->loaded)) return (int)strlen(s) * 6 * scale;
     int w = 0;
     while (*s) w += cp_w(utf8_next(&s), scale);
     return w;
