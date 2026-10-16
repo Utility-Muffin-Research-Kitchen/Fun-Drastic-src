@@ -3201,7 +3201,7 @@ static void menu_render_cheats(SDL_Renderer *r) {
            with 30 Lives" is a real Contra 4 entry. Drawn unclipped they run
            straight through the value on the right and off the panel, so the
            name gets whatever room is left beside it and no more. */
-        SDL_Color tc = sel ? COL(TXT) : (e->enabled ? COL(TXT) : COL(DIM));
+        SDL_Color tc = sel ? COL(TXT) : COL(DIM);
         int name_x = IX + IPAD;
         draw_string_fit(r, e->name, name_x, ty, MN_BIG, tc, vx - IPAD - name_x);
 
