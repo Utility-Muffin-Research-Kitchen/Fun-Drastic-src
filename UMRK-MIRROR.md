@@ -35,9 +35,11 @@ git log --oneline <import commit>..HEAD -- src shared targets docs
 
 Fixes made here should go back to tenlevels so his own tree carries them too.
 
-| Commit | Change |
+| Commit or PR | Change |
 | --- | --- |
 | `c2e270f` | Clip cheat names to the row they are drawn in — long entries from `usrcheat.dat` ran through the `< ON/OFF >` control and off the panel |
+| #1 (`b122411`, `e77d937`) | Name saves after the whole ROM name, cut only on a character boundary — a 28-byte cut split CJK names into invalid UTF-8, which the card refused, so the game exited to a white screen (by YinHeng89) |
+| #2 | Read every cheat in `usrcheat.dat` with its own codes — keep the index scans inside the index, skip each cheat's note before its code count, decode GBK as well as UTF-8 names (`src/gbk_table.h`), and draw glyphs the menu font lacks from `Translate.otf` |
 
 ## Licensing
 
