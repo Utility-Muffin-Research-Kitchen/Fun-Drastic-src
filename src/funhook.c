@@ -132,8 +132,7 @@ static int g_pp_scale_pip   = PP_SCALE_PIP;
 #define OPT_SHORTCUTS     4
 #define OPT_CONTROLS      5
 #define OPT_THEME         6
-#define OPT_LANGUAGE      7
-#define OPT_COUNT         8
+#define OPT_COUNT         7
 
 #define AV_LAYOUT         0  // screen layout picker
 #define AV_OVERLAY        1  // overlay pack picker
@@ -416,7 +415,6 @@ static struct {
 
     int ctrl_map[CTRL_COUNT];
     int mic_btn;                /* fake-mic trigger (SDL button, -1 = off) */
-    char lang_name[24];         /* UI language ("english" = built-in) */
 
     uint32_t joy_held;
 
@@ -1532,7 +1530,6 @@ static void config_init_defaults(void) {
     for (int i = 0; i < SC_COUNT;   i++) { app.sc_btn[i]   = sc_btn_defaults[i]; app.sc_mod[i] = sc_mod_defaults[i]; }
     for (int i = 0; i < CTRL_COUNT; i++)   app.ctrl_map[i] = ctrl_defaults[i];
     app.mic_btn      = MIC_DEFAULT_BTN;   /* L2 (analog trigger, free of DS use) */
-    snprintf(app.lang_name, sizeof(app.lang_name), "english");
     app.sc_binding   = -1;
     app.ctrl_binding = -1;
     app.slot_arrow_flash = 0;
@@ -1808,7 +1805,6 @@ static void emu_config_save(void) {
     fprintf(f, "save_slot %d\n",      app.state_slot);
     fprintf(f, "load_slot %d\n",      app.load_slot);
     fprintf(f, "mic_btn %d\n",        app.mic_btn);
-    fprintf(f, "lang %s\n",           app.lang_name);
     fclose_durable(f);
 }
 
@@ -1903,7 +1899,6 @@ static void emu_config_load(void) {
         if (!strcmp(key, "save_slot"))     app.state_slot    = (val >= 0 && val < MAX_SLOTS) ? val : 0;
         if (!strcmp(key, "load_slot"))     app.load_slot     = (val >= 0 && val < MAX_SLOTS) ? val : 0;
         if (!strcmp(key, "mic_btn"))       app.mic_btn       = (val >= -1 && val < 32) ? val : -1;
-        if (!strcmp(key, "lang"))          snprintf(app.lang_name, sizeof(app.lang_name), "%s", strval);
     }
     fclose(f);
     if (app.layout < 0 || app.layout >= LAYOUT_COUNT) app.layout = 0;
@@ -2550,45 +2545,51 @@ static void rom_name_from_path(const char *path) {
 /* Translations. A language file is KEY=VALUE lines, one per string, where
    the key is the English text. tr() returns the loaded value or the key
    itself, so English needs no file and any untranslated string falls back
-   to English. "english" is built in and always first. */
+   to English. */
 #define LANG_MAX     640
 #define LANG_BUF     32768
-#define LANG_NAME_LEN 24
 static struct {
     char  *key[LANG_MAX];
     char  *val[LANG_MAX];
     int    count;
     char   buf[LANG_BUF];
     int    buf_len;
-    char   names[16][LANG_NAME_LEN];   /* selectable languages, [0]=english */
-    int    n_names;
-    int    sel;
 } g_lang;
 
 static const char *tr(const char *s) {
-    if (!s || g_lang.sel <= 0) return s;
+    if (!s || g_lang.count == 0) return s;
     for (int i = 0; i < g_lang.count; i++)
         if (strcmp(g_lang.key[i], s) == 0) return g_lang.val[i];
     return s;
 }
 
-static void lang_clear(void) { g_lang.count = 0; g_lang.buf_len = 0; }
+static char *lang_trim(char *s) {
+    while (*s == ' ' || *s == '\t') s++;
+    char *e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' ||
+                     e[-1] == '\r' || e[-1] == '\n'))
+        *--e = '\0';
+    return s;
+}
 
 static void lang_load(const char *name) {
-    lang_clear();
-    if (!name || !name[0] || strcmp(name, "english") == 0) return;
+    g_lang.count = 0;
+    g_lang.buf_len = 0;
+    if (!name || !name[0]) return;
+    if (strcmp(name, "en") == 0 || strcmp(name, "english") == 0) return;
     char path[MAX_PATH];
     snprintf(path, sizeof(path), "%s/language/%s.txt", app.drastic_dir, name);
     FILE *f = fopen(path, "r");
     if (!f) return;
     char line[512];
     while (fgets(line, sizeof(line), f) && g_lang.count < LANG_MAX) {
-        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
-        char *eq = strchr(line, '=');
+        char *row = lang_trim(line);
+        if (!row[0] || row[0] == '#') continue;
+        /* Last delimiter, so English keys may contain an equals sign. */
+        char *eq = strrchr(row, '=');
         if (!eq) continue;
         *eq = '\0';
-        char *k = line, *v = eq + 1;
-        char *nl = strpbrk(v, "\r\n"); if (nl) *nl = '\0';
+        char *k = lang_trim(row), *v = lang_trim(eq + 1);
         if (!*k || !*v) continue;
         int kl = (int)strlen(k) + 1, vl = (int)strlen(v) + 1;
         if (g_lang.buf_len + kl + vl > LANG_BUF) break;
@@ -2601,36 +2602,17 @@ static void lang_load(const char *name) {
     fclose(f);
 }
 
-static void font_select(void);   /* defined with the font module below */
-
-static void lang_set_current(void) {
-    snprintf(app.lang_name, sizeof(app.lang_name), "%s",
-             g_lang.names[g_lang.sel]);
-    lang_load(app.lang_name);
-    font_select();
-    emu_config_save();
-}
-
-static void lang_scan(void) {
-    g_lang.n_names = 0;
-    snprintf(g_lang.names[g_lang.n_names++], LANG_NAME_LEN, "english");
-    char dir[MAX_PATH];
-    snprintf(dir, sizeof(dir), "%s/language", app.drastic_dir);
-    DIR *d = opendir(dir);
-    if (d) {
-        struct dirent *e;
-        while ((e = readdir(d)) && g_lang.n_names < 16) {
-            const char *dot = strrchr(e->d_name, '.');
-            if (!dot || strcmp(dot, ".txt") != 0) continue;
-            int n = (int)(dot - e->d_name);
-            if (n <= 0 || n >= LANG_NAME_LEN) continue;
-            if (strncmp(e->d_name, "template", 8) == 0) continue;
-            if (strncmp(e->d_name, "english", 7) == 0) continue;
-            snprintf(g_lang.names[g_lang.n_names], LANG_NAME_LEN, "%.*s", n, e->d_name);
-            g_lang.n_names++;
-        }
-        closedir(d);
+/* System UI language. Leaf/Jawaka export it to their emulators; the value
+   names the file in language/ (zh_CN -> zh_CN.txt). First hit wins. */
+static const char *lang_system(void) {
+    static const char *const vars[] = {
+        "EMU_LANGUAGE", "UMRK_LANGUAGE", "JAWAKA_LANGUAGE",
+    };
+    for (size_t i = 0; i < sizeof(vars) / sizeof(vars[0]); i++) {
+        const char *v = getenv(vars[i]);
+        if (v && v[0]) return v;
     }
+    return NULL;
 }
 
 /* TrueType text. The 5x7 bitmap stays the default; a TTF draws what it
@@ -2748,7 +2730,7 @@ static void font_free(TTFont *f) {
    draw every glyph (a custom theme font) or only the non-bitmap ones (a
    translation, so the bitmap English look and arrows are kept). */
 static void font_select(void) {
-    if (g_lang.sel > 0 && g_ttf_tr.loaded) {
+    if (g_lang.count > 0 && g_ttf_tr.loaded) {
         g_font = &g_ttf_tr; g_font_all = 0;   /* localise: bitmap + TTF fill-in */
     } else if (app.theme >= THEME_COUNT && g_has_custom && g_ttf_custom.loaded) {
         g_font = &g_ttf_custom; g_font_all = 1;  /* custom theme wants its font */
@@ -3358,16 +3340,11 @@ static void menu_render_options(SDL_Renderer *r) {
 
     const char *labels[OPT_COUNT] = {
         "AUDIOVISUAL", "EMULATOR", "CHEATS", "USER", "SHORTCUTS", "CONTROLS", "THEME",
-        "MENU LANGUAGE",
     };
-    const char *vals[OPT_COUNT] = { ">", ">", ">", ">", ">", ">", NULL, NULL };
+    const char *vals[OPT_COUNT] = { ">", ">", ">", ">", ">", ">", NULL };
     char theme_val[32];
     snprintf(theme_val, sizeof(theme_val), "< %s >", theme_name(app.theme));
     vals[OPT_THEME] = theme_val;
-    char lang_val[32];
-    snprintf(lang_val, sizeof(lang_val), "< %s >",
-             g_lang.n_names ? g_lang.names[g_lang.sel] : "english");
-    vals[OPT_LANGUAGE] = lang_val;
 
     static int opt_scroll = 0;
     if (app.menu_item < opt_scroll) opt_scroll = app.menu_item;
@@ -3389,7 +3366,7 @@ static void menu_render_options(SDL_Renderer *r) {
         SDL_Color vc = sel ? COL(TXT) : COL(ACC);
         int vw = str_w(vals[idx], MN_BIG);
         draw_string(r, tr(vals[idx]), RX + RW - vw - RPAD, ty, MN_BIG, vc);
-        if (idx != OPT_THEME && idx != OPT_LANGUAGE) {
+        if (idx != OPT_THEME) {
             int chevx = RX + RW - vw - str_w(">", MN_BIG) - RPAD - 8;
             draw_string(r, ">", chevx, ty, MN_BIG, sel ? COL(TXT) : COL(DIM));
         }
@@ -3594,9 +3571,6 @@ static void menu_input_options(int btn) {
             theme_apply(app.theme);
             font_select();
             emu_config_save();
-        } else if (app.menu_item == OPT_LANGUAGE && g_lang.n_names > 0) {
-            g_lang.sel = (g_lang.sel - 1 + g_lang.n_names) % g_lang.n_names;
-            lang_set_current();
         }
         break;
     case JOY_RIGHT:
@@ -3605,9 +3579,6 @@ static void menu_input_options(int btn) {
             theme_apply(app.theme);
             font_select();
             emu_config_save();
-        } else if (app.menu_item == OPT_LANGUAGE && g_lang.n_names > 0) {
-            g_lang.sel = (g_lang.sel + 1) % g_lang.n_names;
-            lang_set_current();
         }
         break;
     case JOY_A:
@@ -4768,11 +4739,6 @@ static void menu_open(void) {
         theme_load_custom(app.drastic_dir);
         if (app.theme < 0 || app.theme >= theme_total()) app.theme = 0;
         theme_apply(app.theme);
-        lang_scan();
-        g_lang.sel = 0;
-        for (int i = 0; i < g_lang.n_names; i++)
-            if (strcmp(g_lang.names[i], app.lang_name) == 0) { g_lang.sel = i; break; }
-        lang_load(app.lang_name);
         font_load_all(app.drastic_dir, g_custom_font);
 
         app.overlay_pack_idx = 0;
@@ -5926,6 +5892,7 @@ static int hook_main(int argc, char **argv, char **envp) {
     }
     if (app.drastic_dir[0]) {
         emu_config_load();
+        lang_load(lang_system());   /* <value>.txt; a miss leaves English */
 
         {
             char cfg[MAX_PATH];

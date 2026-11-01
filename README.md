@@ -77,6 +77,18 @@ walkthrough — toolchain, cross-SDL2, packaging, deploy paths — in
 **[docs/BUILDING.md](docs/BUILDING.md)**. Adding your own CFW/device? See
 **[CONTRIBUTING.md](CONTRIBUTING.md)**, with `targets/leaf/` as the example.
 
+## Language
+
+The menu follows the system language at startup. `EMU_LANGUAGE` wins, then
+`UMRK_LANGUAGE` and `JAWAKA_LANGUAGE` (what Leaf/Jawaka export). The value
+names the file directly, so `es_MX` loads `language/es_MX.txt`. English is
+built in and is used when no variable is set or the file is missing. There
+is no language menu, so a language change takes effect on the next launch.
+
+To add a language, copy `shared/language/template.txt` to its locale code
+(e.g. `ja_JP.txt`), translate the right side, and drop it in
+`shared/language/`. No code change is needed.
+
 ## Batteries included
 
 DraStic is bundled under `emulator/` — its binaries, free ARM7/ARM9 BIOS, game

@@ -107,6 +107,25 @@ for lg in drastic_logo_0.raw drastic_logo_1.raw; do
     [ -f "$SELF_DIR/$lg" ] && cp -f "$SELF_DIR/$lg" "$STATE_ROOT/$lg" 2>>"$DBG"
 done
 
+# The hook reads translations and their fallback font from the state dir.
+# Sync them when the package has newer files, so a language added in a
+# package update shows up without resetting state.
+mkdir -p "$STATE_ROOT/language" "$STATE_ROOT/fonts" 2>>"$DBG"
+for f in "$SELF_DIR/language/"*.txt; do
+    [ -f "$f" ] || continue
+    dst="$STATE_ROOT/language/$(basename "$f")"
+    if [ "$f" -nt "$dst" ]; then
+        cp -f "$f" "$dst" 2>>"$DBG" && log "language synced: $(basename "$f")" \
+            || log "WARNING: language sync FAILED: $(basename "$f")"
+    fi
+done
+if [ -f "$SELF_DIR/fonts/Translate.otf" ] &&
+   [ "$SELF_DIR/fonts/Translate.otf" -nt "$STATE_ROOT/fonts/Translate.otf" ]; then
+    cp -f "$SELF_DIR/fonts/Translate.otf" "$STATE_ROOT/fonts/" 2>>"$DBG" \
+        && log "translation font synced" \
+        || log "WARNING: translation font sync FAILED"
+fi
+
 for f in "$SELF_DIR/bin/drastic64" "$SELF_DIR/lib/libfundrastic.so" \
          "$SELF_DIR/lib/libSDL2-2.0.so.0" "$SELF_DIR/lib/libxkbcommon.so.0" \
          "$SELF_DIR/lib/libwayland-cursor.so.0" "$SELF_DIR/lib/libasound.so.2"; do
