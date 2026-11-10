@@ -118,7 +118,8 @@ fi
 
 if [ "$target" = "rgdsplus" ]; then
     port="$here/targets/rgdsplus"
-    cp "$port/launch-rom.sh" "$port"/es_*.cfg "$out/"
+    cp "$port/launch-rom.sh" "$port/es_features_fun_drastic.cfg" \
+        "$port/es_systems_fun_drastic.cfg" "$out/"
     chmod +x "$out/drastic" "$out/launch.sh" "$out/launch-rom.sh"
 fi
 

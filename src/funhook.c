@@ -68,6 +68,9 @@ static int g_vfb_h = VFB_H;
 #define VFB_H g_vfb_h
 static int g_panel_w;
 static int g_expand_window;
+#ifdef FUN_DUAL_PANEL
+static int g_layout_configured;
+#endif
 #define MENU_W (g_panel_w ? g_panel_w : VFB_W)
 
 static int g_pp_scale_main  = PP_SCALE_MAIN;
@@ -168,6 +171,7 @@ static int g_pp_scale_pip   = PP_SCALE_PIP;
 #define EMU_ROM_HACK     12  // ignore_gamecard_limit
 #define EMU_COUNT        13
 
+#define LAYOUT_SIDE_BY_SIDE 4
 #define LAYOUT_COUNT    5
 #define LAYOUT_MENU_ITEMS 6
 #define FF_TEMP_SLOT    9   // save slot used during FF speed change (transparent to user)
@@ -1885,7 +1889,12 @@ static void emu_config_load(void) {
         if (sscanf(line, "%31s %31s", key, strval) != 2) continue;
         val = atoi(strval);
         if (!strcmp(key, "theme"))         app.theme         = val;
-        if (!strcmp(key, "layout"))        app.layout        = val;
+        if (!strcmp(key, "layout")) {
+            app.layout = val;
+#ifdef FUN_DUAL_PANEL
+            g_layout_configured = val >= 0 && val < LAYOUT_COUNT;
+#endif
+        }
         if (!strcmp(key, "overlay_pack")) {
             if (strcmp(strval, "none") == 0)
                 app.overlay_pack_name[0] = '\0';
@@ -2440,10 +2449,10 @@ static void compute_layouts(void) {
 
     if (g_panel_w) {
         // Wayland arranges the upper panel at x=0 and the lower panel to its right.
-        layout_slots[4][0] = (screen_slot_t){{0,         0, g_panel_w, VFB_H}, 255};
-        layout_slots[4][1] = (screen_slot_t){{g_panel_w, 0, g_panel_w, VFB_H}, 255};
-        layout_slots_pp[4][0] = layout_slots[4][0];
-        layout_slots_pp[4][1] = layout_slots[4][1];
+        layout_slots[LAYOUT_SIDE_BY_SIDE][0] = (screen_slot_t){{0,         0, g_panel_w, VFB_H}, 255};
+        layout_slots[LAYOUT_SIDE_BY_SIDE][1] = (screen_slot_t){{g_panel_w, 0, g_panel_w, VFB_H}, 255};
+        layout_slots_pp[LAYOUT_SIDE_BY_SIDE][0] = layout_slots[LAYOUT_SIDE_BY_SIDE][0];
+        layout_slots_pp[LAYOUT_SIDE_BY_SIDE][1] = layout_slots[LAYOUT_SIDE_BY_SIDE][1];
     }
 }
 
@@ -4994,6 +5003,8 @@ static void detect_display_size(void) {
         SDL_GetDisplayBounds(0, &top) == 0 && SDL_GetDisplayBounds(1, &bottom) == 0 &&
         top.w == 1024 && top.h == 768 && bottom.w == top.w && bottom.h == top.h &&
         bottom.x == top.x + top.w && bottom.y == top.y) {
+        if (!g_panel_w && !g_layout_configured)
+            app.layout = LAYOUT_SIDE_BY_SIDE;
         g_panel_w = top.w;
         g_vfb_w = top.w + bottom.w;
         g_vfb_h = top.h;
