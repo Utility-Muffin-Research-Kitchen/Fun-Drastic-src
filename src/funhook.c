@@ -42,6 +42,7 @@
 
 /* GBK to Unicode, for cheat names - see cheat_name_decode() */
 #include "gbk_table.h"
+#include "lcd_grid.h"
 
 #define SDCARD_PATH_ENV     "SDCARD_PATH"
 #define SDCARD_DEFAULT      "/mnt/SDCARD"
@@ -4911,55 +4912,9 @@ static void resolve_real(void) {
 
 static inline void hook(void) { pthread_once(&resolve_once, resolve_real); }
 
-#ifdef FUN_DUAL_PANEL
-static int lcd_grid_enabled;
-static struct {
-    SDL_Texture *texture;
-    int w, h;
-} lcd_masks[2];
-
-/* Same native-pixel pattern and brightness as the DraStic LCD grid.
-   Cache it at the destination size so each frame needs just one SDL blit. */
-static void draw_lcd_grid(SDL_Renderer *ren, const SDL_Rect *rect, int screen) {
-    int w = rect->w, h = rect->h;
-    if (lcd_masks[screen].w != w || lcd_masks[screen].h != h) {
-        if (lcd_masks[screen].texture) real_SDL_DestroyTexture(lcd_masks[screen].texture);
-        lcd_masks[screen].texture = NULL;
-        lcd_masks[screen].w = w;
-        lcd_masks[screen].h = h;
-        uint32_t *pixels = malloc((size_t)w * h * sizeof(*pixels));
-        if (!pixels) return;
-        for (int y = 0; y < h; y++) {
-            int row = (2 * y + 1) * DS_H % (2 * h) < SDL_min(h, 2 * DS_H);
-            for (int x = 0; x < w; x++) {
-                int col = (2 * x + 1) * DS_W % (2 * w) < SDL_min(w, 2 * DS_W);
-                uint32_t gray = row && col ? 98 : row || col ? 158 : 255;
-                pixels[(size_t)y * w + x] = gray * 0x01010100u | 0xffu;
-            }
-        }
-        SDL_Texture *mask = real_SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA8888,
-                                                  SDL_TEXTUREACCESS_STATIC, w, h);
-        if (mask && SDL_UpdateTexture(mask, NULL, pixels, w * sizeof(*pixels)) == 0 &&
-            SDL_SetTextureBlendMode(mask, SDL_BLENDMODE_MOD) == 0) {
-            lcd_masks[screen].texture = mask;
-        } else if (mask) {
-            real_SDL_DestroyTexture(mask);
-        }
-        free(pixels);
-    }
-    if (lcd_masks[screen].texture)
-        real_SDL_RenderCopy(ren, lcd_masks[screen].texture, NULL, rect);
-}
-#endif
-
 static void setup_virtual_fb(SDL_Renderer *r) {
 
-#ifdef FUN_DUAL_PANEL
-    for (int i = 0; i < 2; i++) {
-        if (lcd_masks[i].texture) real_SDL_DestroyTexture(lcd_masks[i].texture);
-    }
-    memset(lcd_masks, 0, sizeof(lcd_masks));
-#endif
+    lcd_grid_clear_cache();
     if (app.virtual_fb) {
         SDL_DestroyTexture(app.virtual_fb);
         app.virtual_fb = NULL;
@@ -5139,14 +5094,10 @@ int SDL_RenderCopy(SDL_Renderer *ren, SDL_Texture *tex,
             return 0;
         }
 
-#ifdef FUN_DUAL_PANEL
-        if (lcd_grid_enabled && fn_SetTextureScaleMode)
+        if (lcd_grid_is_enabled() && fn_SetTextureScaleMode)
             fn_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
-#endif
         int rc = real_SDL_RenderCopy(ren, tex, NULL, &s->rect);
-#ifdef FUN_DUAL_PANEL
-        if (rc == 0 && lcd_grid_enabled) draw_lcd_grid(ren, &s->rect, which);
-#endif
+        if (rc == 0) draw_lcd_grid(ren, &s->rect, which, real_SDL_RenderCopy);
         if (app.pip_deferred_tex) {
             if (app.layout == 0) {
                 SDL_SetTextureAlphaMod(app.pip_deferred_tex, app.pip_deferred_alpha);
@@ -6059,10 +6010,7 @@ static void *boot_watchdog(void *arg) {
 
 static int hook_main(int argc, char **argv, char **envp) {
     hook();
-#ifdef FUN_DUAL_PANEL
-    const char *shader = getenv("FUN_DRASTIC_SHADER");
-    lcd_grid_enabled = shader && (!strcmp(shader, "lcd3x") || !strcmp(shader, "lcd-grid"));
-#endif
+    lcd_grid_init(DS_W, DS_H);
     /* Data home: the binary's own directory by default; ports whose
        binary sits in bin/ export FUN_DRASTIC_DIR to name it explicitly. */
     const char *fdir = getenv("FUN_DRASTIC_DIR");
