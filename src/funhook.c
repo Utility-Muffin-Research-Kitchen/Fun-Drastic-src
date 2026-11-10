@@ -42,6 +42,7 @@
 
 /* GBK to Unicode, for cheat names - see cheat_name_decode() */
 #include "gbk_table.h"
+#include "lcd_grid.h"
 
 #define SDCARD_PATH_ENV     "SDCARD_PATH"
 #define SDCARD_DEFAULT      "/mnt/SDCARD"
@@ -66,6 +67,12 @@ static int g_vfb_h = VFB_H;
 #undef  VFB_H
 #define VFB_W g_vfb_w
 #define VFB_H g_vfb_h
+static int g_panel_w;
+static int g_expand_window;
+#ifdef FUN_DUAL_PANEL
+static int g_layout_configured;
+#endif
+#define MENU_W (g_panel_w ? g_panel_w : VFB_W)
 
 static int g_pp_scale_main  = PP_SCALE_MAIN;
 static int g_pp_scale_focus = PP_SCALE_FOCUS;
@@ -165,6 +172,7 @@ static int g_pp_scale_pip   = PP_SCALE_PIP;
 #define EMU_ROM_HACK     12  // ignore_gamecard_limit
 #define EMU_COUNT        13
 
+#define LAYOUT_SIDE_BY_SIDE 4
 #define LAYOUT_COUNT    5
 #define LAYOUT_MENU_ITEMS 6
 #define FF_TEMP_SLOT    9   // save slot used during FF speed change (transparent to user)
@@ -1882,7 +1890,12 @@ static void emu_config_load(void) {
         if (sscanf(line, "%31s %31s", key, strval) != 2) continue;
         val = atoi(strval);
         if (!strcmp(key, "theme"))         app.theme         = val;
-        if (!strcmp(key, "layout"))        app.layout        = val;
+        if (!strcmp(key, "layout")) {
+            app.layout = val;
+#ifdef FUN_DUAL_PANEL
+            g_layout_configured = val >= 0 && val < LAYOUT_COUNT;
+#endif
+        }
         if (!strcmp(key, "overlay_pack")) {
             if (strcmp(strval, "none") == 0)
                 app.overlay_pack_name[0] = '\0';
@@ -2031,18 +2044,42 @@ static void *drastic_system(void) { return (void *)(uintptr_t)OFF_VAR_SYSTEM; }
 static void *drastic_system(void) { return DRASTIC_VAR(OFF_VAR_SYSTEM); }
 #endif
 
+#ifdef FUN_DUAL_PANEL
+static struct {
+    int down;
+    SDL_TouchID device;
+    SDL_FingerID finger;
+    uint32_t x, y;
+} panel_touch;
+#endif
+
 /* Touch write into the emulator input_struct. Called from both the
  * PollEvent and present hooks so no internal stage can overwrite it.
  * One trailing clear when the pen lifts. */
 static void nds_touch_enforce(void) {
     static int touch_written = 0;
-    if (!app.cursor_touch_down && !touch_written) return;
+    int down = app.cursor_touch_down;
+    uint32_t x = (uint32_t)app.cursor_nx, y = (uint32_t)app.cursor_ny;
+#ifdef FUN_DUAL_PANEL
+    if (panel_touch.down) {
+        down = 1;
+        x = panel_touch.x;
+        y = panel_touch.y;
+    }
+#endif
+    if (!down && !touch_written) return;
     void *sys = drastic_system();
     if (!sys) return;
     uint8_t *in = (uint8_t *)sys + NDS_TOUCH_INPUT_OFFSET;
-    if (app.cursor_touch_down) {
-        *(uint32_t *)(in + NDS_IN_TOUCH_X) = (uint32_t)app.cursor_nx;
-        *(uint32_t *)(in + NDS_IN_TOUCH_Y) = (uint32_t)app.cursor_ny;
+#ifdef FUN_DUAL_PANEL
+    /* platform_get_input derives touch_status from this bit every frame. */
+    uint32_t *buttons = (uint32_t *)(in + NDS_IN_BTN);
+    if (down) *buttons |= 0x00020000u;
+    else *buttons &= ~0x00020000u;
+#endif
+    if (down) {
+        *(uint32_t *)(in + NDS_IN_TOUCH_X) = x;
+        *(uint32_t *)(in + NDS_IN_TOUCH_Y) = y;
         *(uint8_t  *)(in + NDS_IN_TOUCH_ST) = 1;
         *(uint8_t  *)(in + NDS_IN_TOUCH_PR) = 1;
         touch_written = 1;
@@ -2294,7 +2331,7 @@ static screen_slot_t layout_slots[LAYOUT_COUNT][2];
 static screen_slot_t layout_slots_pp[LAYOUT_COUNT][2];
 
 static void compute_layouts(void) {
-    float sx = (float)VFB_W / 640.0f;
+    float sx = (float)MENU_W / 640.0f;
     float sy = (float)VFB_H / 480.0f;
 #define SC(v,s) ((int)((v)*(s)+0.5f))
 
@@ -2310,7 +2347,7 @@ static void compute_layouts(void) {
 
     g_prev_w      = SC(296, sx);
     g_prev_h      = g_prev_w * VFB_H / VFB_W;
-    g_prev_x      = VFB_W - g_prev_w - SC(16, sx);
+    g_prev_x      = MENU_W - g_prev_w - SC(16, sx);
     g_prev_y      = g_content_y + SC(8, sy);
 
     #define FIT43W(bw,bh) (((bw)*3 <= (bh)*4) ? (bw) : ((bh)*4/3))
@@ -2410,6 +2447,14 @@ static void compute_layouts(void) {
 
     layout_slots_pp[4][0] = (screen_slot_t){{ (VFB_W-(NDS_W*2+PP_GAP))/2+NDS_W+PP_GAP, (VFB_H-NDS_H)/2, NDS_W, NDS_H }, 255};
     layout_slots_pp[4][1] = (screen_slot_t){{ (VFB_W-(NDS_W*2+PP_GAP))/2,               (VFB_H-NDS_H)/2, NDS_W, NDS_H }, 255};
+
+    if (g_panel_w) {
+        // Wayland arranges the upper panel at x=0 and the lower panel to its right.
+        layout_slots[LAYOUT_SIDE_BY_SIDE][0] = (screen_slot_t){{0,         0, g_panel_w, VFB_H}, 255};
+        layout_slots[LAYOUT_SIDE_BY_SIDE][1] = (screen_slot_t){{g_panel_w, 0, g_panel_w, VFB_H}, 255};
+        layout_slots_pp[LAYOUT_SIDE_BY_SIDE][0] = layout_slots[LAYOUT_SIDE_BY_SIDE][0];
+        layout_slots_pp[LAYOUT_SIDE_BY_SIDE][1] = layout_slots[LAYOUT_SIDE_BY_SIDE][1];
+    }
 }
 
 static const char *layout_names[LAYOUT_COUNT] = {
@@ -2463,6 +2508,44 @@ static SDL_Rect cursor_touch_rect(void) {
     const screen_slot_t (*slots)[2] = app.pixel_perfect ? layout_slots_pp : layout_slots;
     return slots[app.layout][ts].rect;
 }
+
+#ifdef FUN_DUAL_PANEL
+static void panel_touch_event(const SDL_TouchFingerEvent *event) {
+    if (app.in_menu || app.quitting || !app.window) return;
+    if (panel_touch.down &&
+        (panel_touch.device != event->touchId || panel_touch.finger != event->fingerId))
+        return;
+    if (event->type != SDL_FINGERDOWN && !panel_touch.down) return;
+    if (event->type == SDL_FINGERUP) {
+        panel_touch.down = 0;
+        nds_touch_enforce();
+        return;
+    }
+
+    SDL_Rect rect = cursor_touch_rect();
+    if (rect.w <= 0 || rect.h <= 0) return;
+
+    // ROCKNIX maps Goodix to the first output and calibrates it to that
+    // output's right half. Undo the half-width calibration to reach the
+    // second panel in the window (512..1024 maps to 1024..2048).
+    float x = event->x * VFB_W;
+    float y = event->y * VFB_H;
+    if (g_panel_w) x *= 2.0f;
+    if (fun_evlog())
+        fprintf(stderr, "[fun] touch %.3f,%.3f -> %.1f,%.1f rect %d,%d %dx%d\n",
+                event->x, event->y, x, y, rect.x, rect.y, rect.w, rect.h);
+    if (event->type == SDL_FINGERDOWN &&
+        (x < rect.x || x >= rect.x + rect.w || y < rect.y || y >= rect.y + rect.h))
+        return;
+
+    panel_touch.x = (uint32_t)fminf(DS_W - 1, fmaxf(0, (x - rect.x) * DS_W / rect.w));
+    panel_touch.y = (uint32_t)fminf(DS_H - 1, fmaxf(0, (y - rect.y) * DS_H / rect.h));
+    panel_touch.device = event->touchId;
+    panel_touch.finger = event->fingerId;
+    panel_touch.down = 1;
+    nds_touch_enforce();
+}
+#endif
 
 static void cursor_tex_load(SDL_Renderer *r) {
     if (app.cursor_tex) return;
@@ -3069,7 +3152,7 @@ static void draw_centered(SDL_Renderer *r, const char *s,
 }
 
 static void menu_bg(SDL_Renderer *r) {
-    fill_rect(r, 0, 0, VFB_W, VFB_H, C_BG);
+    fill_rect(r, 0, 0, MENU_W, VFB_H, C_BG);
 }
 
 static void draw_list_row(SDL_Renderer *r, int rx, int iy, int rw, int rh,
@@ -3103,8 +3186,8 @@ static int fit_row_h(int count) {
 }
 
 static void draw_header(SDL_Renderer *r) {
-    fill_rect(r, 0, 0, VFB_W, g_content_y, C_HDR);
-    fill_rect(r, 0, g_content_y - 2, VFB_W, 2, C_ACC);
+    fill_rect(r, 0, 0, MENU_W, g_content_y, C_HDR);
+    fill_rect(r, 0, g_content_y - 2, MENU_W, 2, C_ACC);
 
     const char *title = app.rom_display[0] ? app.rom_display : (app.rom_name[0] ? app.rom_name : "FUN DRASTIC");
     int hty = (g_content_y - str_h(MN_BIG)) / 2;
@@ -3112,13 +3195,13 @@ static void draw_header(SDL_Renderer *r) {
 }
 
 static void draw_footer(SDL_Renderer *r, const char *left, const char *right) {
-    fill_rect(r, 0, FOOTER_Y, VFB_W, FOOTER_H, C_HDR);
-    fill_rect(r, 0, FOOTER_Y, VFB_W, 2, C_SEP);
+    fill_rect(r, 0, FOOTER_Y, MENU_W, FOOTER_H, C_HDR);
+    fill_rect(r, 0, FOOTER_Y, MENU_W, 2, C_SEP);
     int ty = FOOTER_Y + (FOOTER_H - str_h(MN_NRM)) / 2;
     if (left)  draw_string(r, left,  16, ty, MN_NRM, COL(DIM));
     if (right) {
         int rw = str_w(right, MN_NRM);
-        draw_string(r, right, VFB_W - rw - 16, ty, MN_NRM, COL(DIM));
+        draw_string(r, right, MENU_W - rw - 16, ty, MN_NRM, COL(DIM));
     }
 }
 
@@ -3127,12 +3210,21 @@ static void present_vfb(void) {
         present_black(app.renderer);
         return;
     }
+    if (g_panel_w) SDL_RenderSetViewport(app.renderer, NULL);
     real_SDL_SetRenderTarget(app.renderer, NULL);
     real_SDL_RenderClear(app.renderer);
     real_SDL_RenderCopyEx(app.renderer, app.virtual_fb, NULL, &ROT_DST,
                           ROT_ANGLE, NULL, SDL_FLIP_NONE);
     real_SDL_RenderPresent(app.renderer);
     real_SDL_SetRenderTarget(app.renderer, app.virtual_fb);
+}
+
+static void menu_target(void) {
+    real_SDL_SetRenderTarget(app.renderer, app.virtual_fb);
+    if (g_panel_w) {
+        const SDL_Rect lower = {g_panel_w, 0, g_panel_w, VFB_H};
+        SDL_RenderSetViewport(app.renderer, &lower);
+    }
 }
 
 #define CHEAT_ROWS_VISIBLE 6
@@ -3143,7 +3235,7 @@ static void menu_render_cheats(SDL_Renderer *r) {
     draw_header(r);
     draw_footer(r, tr("B: BACK"), NULL);
 
-    const int IX = 16, IW = VFB_W - 32, IH = MENU_RH, IY = CONTENT_Y, IPAD = 16;
+    const int IX = 16, IW = MENU_W - 32, IH = MENU_RH, IY = CONTENT_Y, IPAD = 16;
 
     if (!g_cheats.loaded || g_cheats.count == 0) {
         const char *msg;
@@ -3245,10 +3337,11 @@ static const char *main_labels[MI_COUNT] = {
 
     if (app.game_bg_tex) {
         SDL_SetTextureColorMod(app.game_bg_tex, 65, 65, 78);
-        real_SDL_RenderCopy(r, app.game_bg_tex, NULL, NULL);
+        const SDL_Rect lower = {g_panel_w, 0, g_panel_w, VFB_H};
+        real_SDL_RenderCopy(r, app.game_bg_tex, g_panel_w ? &lower : NULL, NULL);
         SDL_SetTextureColorMod(app.game_bg_tex, 255, 255, 255);
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-        fill_rect(r, 0, 0, VFB_W, VFB_H, 0, 0, 10, 110);
+        fill_rect(r, 0, 0, MENU_W, VFB_H, 0, 0, 10, 110);
     } else {
         menu_bg(r);
     }
@@ -3335,7 +3428,7 @@ static void menu_render_options(SDL_Renderer *r) {
     draw_footer(r, tr("B: BACK"),
         (app.menu_item == OPT_THEME) ? "A: CHANGE" : "A: SELECT");
 
-    const int RX = 18, RW = VFB_W - 36, RH = MENU_RH, RY = CONTENT_Y, RPAD = 16;
+    const int RX = 18, RW = MENU_W - 36, RH = MENU_RH, RY = CONTENT_Y, RPAD = 16;
     const int VISIBLE = g_menu_vis;
 
     const char *labels[OPT_COUNT] = {
@@ -3689,7 +3782,7 @@ static void menu_render_shortcuts(SDL_Renderer *r) {
     else
         draw_footer(r, tr("B: BACK"), tr("X: CLEAR  A: BIND"));
 
-    const int RX = 18, RW = VFB_W - 36, RH = fit_row_h(SC_COUNT), RY = CONTENT_Y, RPAD = 16;
+    const int RX = 18, RW = MENU_W - 36, RH = fit_row_h(SC_COUNT), RY = CONTENT_Y, RPAD = 16;
     char combo[32];
 
     for (int i = 0; i < SC_COUNT; i++) {
@@ -3723,6 +3816,7 @@ static int capture_button(void (*render)(SDL_Renderer *), int *mod) {
             if (mod) *mod = PAD_isPressed(JOY_MENU) ? 1 : 0;
             btn = b; bound = 1; break;
         }
+        menu_target();
         render(app.renderer);
         present_vfb();
         if (!bound) real_SDL_Delay(16);
@@ -3778,7 +3872,7 @@ static void menu_render_controls(SDL_Renderer *r) {
     else
         draw_footer(r, tr("B: BACK"), tr("X: RESET  A: REBIND"));
 
-    const int RX = 18, RW = VFB_W - 36, RH = MENU_RH, RY = CONTENT_Y, RPAD = 16;
+    const int RX = 18, RW = MENU_W - 36, RH = MENU_RH, RY = CONTENT_Y, RPAD = 16;
     const int VISIBLE = g_menu_vis;
     int scroll = app.menu_item - VISIBLE + 1;
     if (scroll < 0) scroll = 0;
@@ -4033,7 +4127,7 @@ static void menu_render_audiovisual(SDL_Renderer *r) {
         (app.cursor_speed != CURSOR_SPEED_DEFAULT),
     };
 
-    const int RX = 18, RW = VFB_W - 36, RH = MENU_RH, RY = CONTENT_Y, RPAD = 16;
+    const int RX = 18, RW = MENU_W - 36, RH = MENU_RH, RY = CONTENT_Y, RPAD = 16;
     int av_vis = g_menu_vis;
     if (app.menu_item < app.av_scroll) app.av_scroll = app.menu_item;
     if (app.menu_item >= app.av_scroll + av_vis) app.av_scroll = app.menu_item - av_vis + 1;
@@ -4141,7 +4235,7 @@ static void emu_clamp_scroll(void);
 
 static void modal_scrim(SDL_Renderer *r) {
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-    fill_rect(r, 0, 0, VFB_W, VFB_H, 0, 0, 0, 170);
+    fill_rect(r, 0, 0, MENU_W, VFB_H, 0, 0, 0, 170);
 }
 
 /* Clock editor popup: LEFT/RIGHT picks a field, UP/DOWN spins it,
@@ -4158,7 +4252,7 @@ static void clockpop_open(void) {
 static void clockpop_render(SDL_Renderer *r) {
     modal_scrim(r);
 
-    int gap = VFB_W / 240; if (gap < 2) gap = 2;
+    int gap = MENU_W / 240; if (gap < 2) gap = 2;
     char f0[6], f2[3], f3[3], f4[3];
     snprintf(f0, sizeof(f0), "%d",   app.rtc_year);
     snprintf(f2, sizeof(f2), "%02d", app.rtc_day);
@@ -4183,7 +4277,7 @@ static void clockpop_render(SDL_Renderer *r) {
     /* opaque panel - nothing from the page behind shows through */
     int pw = total_w + 10 * gap;
     int ph = title_h + bh + 10 * gap;
-    int px = (VFB_W - pw) / 2;
+    int px = (MENU_W - pw) / 2;
     int py = CONTENT_Y + (FOOTER_Y - CONTENT_Y - ph) / 2;
     fill_rect(r, px - 2, py - 2, pw + 4, ph + 4, C_SEP);
     fill_rect(r, px, py, pw, ph, C_BG);
@@ -4218,7 +4312,7 @@ static void menu_render_emulator(SDL_Renderer *r) {
                       app.menu_item == EMU_CUSTOM_CLOCK && app.rtc_mode == 2);
     draw_footer(r, tr("B: BACK"), a_editable ? tr("A: EDIT") : NULL);
 
-    const int RX = 18, RW = VFB_W - 36, RH = MENU_RH, RY = CONTENT_Y, RPAD = 16;
+    const int RX = 18, RW = MENU_W - 36, RH = MENU_RH, RY = CONTENT_Y, RPAD = 16;
 
     const char *labels[EMU_COUNT] = {
         "AUTO RESUME",   "CUSTOM CLOCK",
@@ -4513,22 +4607,22 @@ static void osk_input(int btn) {
 static void osk_render(SDL_Renderer *r) {
     modal_scrim(r);
 
-    int gap = VFB_W / 240; if (gap < 2) gap = 2;
-    int cw  = (VFB_W * 5 / 6 - 9 * gap) / 10;
+    int gap = MENU_W / 240; if (gap < 2) gap = 2;
+    int cw  = (MENU_W * 5 / 6 - 9 * gap) / 10;
     int kh  = cw * 3 / 4;
     int gw  = 10 * cw + 9 * gap;
-    int gx  = (VFB_W - gw) / 2;
+    int gx  = (MENU_W - gw) / 2;
 
     int in_h  = kh;
     int in_w  = NAME_MAX_LEN * cw + (NAME_MAX_LEN - 1) * gap;
-    int in_x  = (VFB_W - in_w) / 2;
+    int in_x  = (MENU_W - in_w) / 2;
 
     int title_h = str_h(MN_BIG) + 3 * gap;
     int total_h = title_h + in_h + 3 * gap + OSK_ROWS * kh + (OSK_ROWS - 1) * gap;
     int top = CONTENT_Y + (FOOTER_Y - CONTENT_Y - total_h) / 2;
     if (top < CONTENT_Y) top = CONTENT_Y;
 
-    draw_centered(r, tr("PLAYER NAME"), 0, top, VFB_W, str_h(MN_BIG), MN_BIG, COL(ACC));
+    draw_centered(r, tr("PLAYER NAME"), 0, top, MENU_W, str_h(MN_BIG), MN_BIG, COL(ACC));
 
     int iy = top + title_h;
     for (int i = 0; i < NAME_MAX_LEN; i++) {
@@ -4548,7 +4642,7 @@ static void osk_render(SDL_Renderer *r) {
         if (row < OSK_ROWS - 1) {
             int n   = osk_row_len(row);
             int rw2 = n * cw + (n - 1) * gap;
-            int rx  = (VFB_W - rw2) / 2;
+            int rx  = (MENU_W - rw2) / 2;
             for (int c = 0; c < n; c++) {
                 int x   = rx + c * (cw + gap);
                 int sel = (g_osk.row == row && g_osk.col == c);
@@ -4591,7 +4685,7 @@ static void menu_render_user(SDL_Renderer *r) {
     else
         draw_footer(r, tr("B: BACK"), a_editable ? tr("A: EDIT") : NULL);
 
-    const int RX = 18, RW = VFB_W - 36, RH = fit_row_h(USR_COUNT), RY = CONTENT_Y, RPAD = 16;
+    const int RX = 18, RW = MENU_W - 36, RH = fit_row_h(USR_COUNT), RY = CONTENT_Y, RPAD = 16;
 
     char bday_str[8];
     snprintf(bday_str, sizeof(bday_str), "%s %02d",
@@ -4723,6 +4817,10 @@ static void menu_input_user(int btn) {
 static void menu_open(void) {
     if (app.in_menu) return;
     app.cursor_touch_down = 0;   /* pen up - don't hold a touch through the menu */
+#ifdef FUN_DUAL_PANEL
+    panel_touch.down = 0;
+    nds_touch_enforce();
+#endif
     /* PAD edge state is only maintained inside the menu loop; a button
        still down at the last menu close stays latched in PAD_curr and
        eats its own first press next session. Start every session clean. */
@@ -4816,6 +4914,7 @@ static inline void hook(void) { pthread_once(&resolve_once, resolve_real); }
 
 static void setup_virtual_fb(SDL_Renderer *r) {
 
+    lcd_grid_clear_cache();
     if (app.virtual_fb) {
         SDL_DestroyTexture(app.virtual_fb);
         app.virtual_fb = NULL;
@@ -4853,6 +4952,22 @@ int SDL_OpenAudio(SDL_AudioSpec *desired, SDL_AudioSpec *obtained) {
 }
 
 static void detect_display_size(void) {
+#ifdef FUN_DUAL_PANEL
+    SDL_Rect top, bottom;
+    if (SDL_GetNumVideoDisplays() == 2 &&
+        SDL_GetDisplayBounds(0, &top) == 0 && SDL_GetDisplayBounds(1, &bottom) == 0 &&
+        top.w == 1024 && top.h == 768 && bottom.w == top.w && bottom.h == top.h &&
+        bottom.x == top.x + top.w && bottom.y == top.y) {
+        if (!g_panel_w && !g_layout_configured)
+            app.layout = LAYOUT_SIDE_BY_SIDE;
+        g_panel_w = top.w;
+        g_vfb_w = top.w + bottom.w;
+        g_vfb_h = top.h;
+        compute_layouts();
+        return;
+    }
+#endif
+    g_panel_w = 0;
     SDL_DisplayMode mode;
     if (SDL_GetCurrentDisplayMode(0, &mode) == 0 && mode.w > 0 && mode.h > 0) {
         int dw = (mode.w > mode.h) ? mode.w : mode.h;
@@ -4877,7 +4992,8 @@ SDL_Window *SDL_CreateWindow(const char *title, int x, int y,
     /* some compositors only grant input focus to fullscreen toplevels */
     flags |= SDL_WINDOW_FULLSCREEN;
 #endif
-    app.window = real_SDL_CreateWindow(title, x, y, g_vfb_w, g_vfb_h, flags);
+    app.window = real_SDL_CreateWindow(title, x, y, MENU_W, VFB_H, flags);
+    g_expand_window = app.window && g_panel_w;
     return app.window;
 }
 
@@ -4889,10 +5005,11 @@ int SDL_CreateWindowAndRenderer(int w, int h, Uint32 flags,
                                 SDL_Window **ow, SDL_Renderer **or_) {
     hook(); (void)w; (void)h;
     detect_display_size();
-    int ret = real_SDL_CreateWindowAndRenderer(g_vfb_w, g_vfb_h, flags, ow, or_);
+    int ret = real_SDL_CreateWindowAndRenderer(MENU_W, VFB_H, flags, ow, or_);
     if (ret == 0) {
         app.window   = *ow;
         app.renderer = *or_;
+        g_expand_window = g_panel_w != 0;
         setup_virtual_fb(app.renderer);
     }
     return ret;
@@ -4977,7 +5094,10 @@ int SDL_RenderCopy(SDL_Renderer *ren, SDL_Texture *tex,
             return 0;
         }
 
+        if (lcd_grid_is_enabled() && fn_SetTextureScaleMode)
+            fn_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
         int rc = real_SDL_RenderCopy(ren, tex, NULL, &s->rect);
+        if (rc == 0) draw_lcd_grid(ren, &s->rect, which, real_SDL_RenderCopy);
         if (app.pip_deferred_tex) {
             if (app.layout == 0) {
                 SDL_SetTextureAlphaMod(app.pip_deferred_tex, app.pip_deferred_alpha);
@@ -5336,6 +5456,11 @@ void SDL_RenderPresent(SDL_Renderer *ren) {
     }
 
     real_SDL_RenderPresent(ren);
+    if (g_expand_window && ren == app.renderer) {
+        // Anchor the initial window on the upper output before expanding.
+        real_SDL_SetWindowSize(app.window, VFB_W, VFB_H);
+        g_expand_window = 0;
+    }
     g_vfb_frame_cleared = 0;   /* next game frame clears the vfb once */
 
     real_SDL_SetRenderTarget(ren, app.virtual_fb);
@@ -5344,7 +5469,12 @@ void SDL_RenderPresent(SDL_Renderer *ren) {
 SDL_Texture *SDL_CreateTexture(SDL_Renderer *ren, Uint32 fmt,
                                int access, int w, int h) {
     SDL_Texture *t = real_SDL_CreateTexture(ren, fmt, access, w, h);
-    if (access == SDL_TEXTUREACCESS_STREAMING && w == DS_W && h == DS_H) {
+    int screen_size = w == DS_W && h == DS_H;
+#ifdef FUN_DUAL_PANEL
+    // ROCKNIX's DraStic may recreate the screen textures at twice the DS size.
+    screen_size |= w == 2 * DS_W && h == 2 * DS_H;
+#endif
+    if (t && access == SDL_TEXTUREACCESS_STREAMING && screen_size) {
         if      (!app.screens[0]) app.screens[0] = t;
         else if (!app.screens[1]) app.screens[1] = t;
     }
@@ -5451,7 +5581,14 @@ repoll:
 #ifdef NDS_EVDEV_PAD
     if (!result && !app.in_menu) result = nds_evpad_next_event(event);
 #endif
-    if (result) evlog_event(event, "main");
+    if (result && event) evlog_event(event, "main");
+#ifdef FUN_DUAL_PANEL
+    if (result && event && (event->type == SDL_FINGERDOWN ||
+        event->type == SDL_FINGERMOTION || event->type == SDL_FINGERUP)) {
+        panel_touch_event(&event->tfinger);
+        goto repoll;
+    }
+#endif
 
     if (result && event->type == SDL_JOYBUTTONDOWN)
         app.joy_held |=  (1u << event->jbutton.button);
@@ -5624,7 +5761,7 @@ repoll:
             if (!app.in_menu) break;
             if (app.quitting) break;
 
-            real_SDL_SetRenderTarget(app.renderer, app.virtual_fb);
+            menu_target();
             switch (app.view) {
             case VIEW_MAIN:      menu_render_main(app.renderer);      break;
             case VIEW_OPTIONS:   menu_render_options(app.renderer);   break;
@@ -5637,13 +5774,7 @@ repoll:
             case VIEW_OVERLAY:      menu_render_overlay(app.renderer);      break;
             case VIEW_CHEATS:       menu_render_cheats(app.renderer);       break;
             }
-            {
-                real_SDL_SetRenderTarget(app.renderer, NULL);
-                real_SDL_RenderClear(app.renderer);
-                real_SDL_RenderCopyEx(app.renderer, app.virtual_fb, NULL, &ROT_DST,
-                                      ROT_ANGLE, NULL, SDL_FLIP_NONE);
-                real_SDL_RenderPresent(app.renderer);
-            }
+            present_vfb();
             real_SDL_Delay(16);
         }
 
@@ -5879,6 +6010,7 @@ static void *boot_watchdog(void *arg) {
 
 static int hook_main(int argc, char **argv, char **envp) {
     hook();
+    lcd_grid_init(DS_W, DS_H);
     /* Data home: the binary's own directory by default; ports whose
        binary sits in bin/ export FUN_DRASTIC_DIR to name it explicitly. */
     const char *fdir = getenv("FUN_DRASTIC_DIR");

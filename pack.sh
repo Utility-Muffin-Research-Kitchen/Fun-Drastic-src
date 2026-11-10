@@ -116,4 +116,11 @@ if [ -f "$here/targets/$target/theme/custom.cfg" ]; then
     [ -f "$here/targets/$target/theme/"*.ttf ] && cp "$here/targets/$target/theme/"*.ttf "$out/fonts/" 2>/dev/null || true
 fi
 
+if [ "$target" = "rgdsplus" ]; then
+    port="$here/targets/rgdsplus"
+    cp "$port/launch-rom.sh" "$port/es_features_fun_drastic.cfg" \
+        "$port/es_systems_fun_drastic.cfg" "$out/"
+    chmod +x "$out/drastic" "$out/launch.sh" "$out/launch-rom.sh"
+fi
+
 echo "Packed: dist/$target/NDS.pak"
