@@ -5344,7 +5344,11 @@ void SDL_RenderPresent(SDL_Renderer *ren) {
 SDL_Texture *SDL_CreateTexture(SDL_Renderer *ren, Uint32 fmt,
                                int access, int w, int h) {
     SDL_Texture *t = real_SDL_CreateTexture(ren, fmt, access, w, h);
-    if (access == SDL_TEXTUREACCESS_STREAMING && w == DS_W && h == DS_H) {
+    /* DraStic recreates both screen textures at 2x resolution for hires_3d.
+       Register them too, so layout/swap and touch mapping use the same screens. */
+    if (t && access == SDL_TEXTUREACCESS_STREAMING &&
+        ((w == DS_W && h == DS_H) ||
+         (w == 2 * DS_W && h == 2 * DS_H))) {
         if      (!app.screens[0]) app.screens[0] = t;
         else if (!app.screens[1]) app.screens[1] = t;
     }
